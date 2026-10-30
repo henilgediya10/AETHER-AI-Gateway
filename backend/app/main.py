@@ -10,7 +10,7 @@ import contextvars
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from threading import Lock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from uuid import uuid4
@@ -18,7 +18,7 @@ from typing import Literal
 
 import httpx
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, Query
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from sqlalchemy import text as sql_text, inspect
@@ -300,6 +300,8 @@ if not IS_PROD:
 
 # User registration / login API
 app.include_router(auth_router)
+
+
 @app.get("/admin/metrics", tags=["Operations"])
 def admin_metrics(request: Request):
     import secrets
@@ -311,6 +313,7 @@ def admin_metrics(request: Request):
         raise HTTPException(status_code=403, detail="Metrics access denied")
 
     return metrics.snapshot()
+
 
 @app.get("/health/live", tags=["Operations"])
 def liveness():
@@ -443,13 +446,92 @@ app.add_middleware(
     allow_origins=(
         CORS_ORIGINS
         if IS_PROD
-        else ["http://localhost:5173", "http://127.0.0.1:5173"]
+        else [
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+        ]
     ),
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
 
+
+# ==========================================
+# ADMIN DASHBOARD: authenticated database analytics
+# ==========================================
+
+from sqlalchemy import select as admin_select, func as admin_func
+from .models.usage import MonthlyUsage, AIUsageEvent
+
+def require_admin(user: User = Depends(get_current_user)):
+    # Explicit allowlist; never trust a user-supplied plan or role.
+    emails = {e.strip().lower() for e in os.getenv("AETHER_ADMIN_EMAILS", "").split(",") if e.strip()}
+    if not emails or user.email.lower() not in emails:
+        raise HTTPException(status_code=403, detail="Admin access denied")
+    return user
+
+
+@app.get("/admin/analytics/daily", tags=["Admin"])
+def admin_daily_analytics(
+    days: int = Query(30, ge=1, le=365),
+    _admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+):
+    """Successful AI requests and tokens per UTC day for the last `days` days."""
+    today = datetime.now(timezone.utc).date()
+    start_date = today - timedelta(days=days - 1)
+    start_time = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc)
+
+    events = db.execute(
+        admin_select(AIUsageEvent.created_at, AIUsageEvent.tokens)
+        .where(AIUsageEvent.created_at >= start_time)
+    ).all()
+
+    daily = defaultdict(lambda: {"requests": 0, "tokens": 0})
+    for created_at, tokens in events:
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        day = created_at.astimezone(timezone.utc).date().isoformat()
+        daily[day]["requests"] += 1
+        daily[day]["tokens"] += tokens or 0
+
+    results = []
+    for i in range(days):
+        date = (start_date + timedelta(days=i)).isoformat()
+        results.append({
+            "date": date,
+            "requests": daily[date]["requests"],
+            "tokens": daily[date]["tokens"],
+        })
+
+    return {"period_days": days, "timezone": "UTC", "daily": results}
+
+
+@app.get("/admin/overview", tags=["Admin"])
+def admin_overview(_admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    users = db.scalar(admin_select(admin_func.count(User.id))) or 0
+    active = db.scalar(admin_select(admin_func.count(User.id)).where(User.is_active.is_(True))) or 0
+    plans = db.execute(admin_select(User.plan, admin_func.count(User.id)).group_by(User.plan)).all()
+    requests_month = db.scalar(admin_select(admin_func.coalesce(admin_func.sum(MonthlyUsage.requests), 0)).where(MonthlyUsage.month == month)) or 0
+    successes = db.scalar(admin_select(admin_func.count(AIUsageEvent.id))) or 0
+    tokens = db.scalar(admin_select(admin_func.coalesce(admin_func.sum(AIUsageEvent.tokens), 0))) or 0
+    providers = db.execute(admin_select(AIUsageEvent.provider, admin_func.count(AIUsageEvent.id), admin_func.coalesce(admin_func.sum(AIUsageEvent.tokens), 0)).group_by(AIUsageEvent.provider)).all()
+    return {"registered_users": users, "enabled_accounts": active, "plans": {p: n for p,n in plans}, "month": month, "requests_this_month": requests_month, "successful_ai_events_all_time": successes, "tokens_all_time": tokens, "providers": [{"provider": p, "successful_calls": n, "tokens": t} for p,n,t in providers], "provider_metrics_current_process": metrics.snapshot()}
+
+
+@app.get("/admin/users", tags=["Admin"])
+def admin_users(_admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    # Aggregate separately to avoid multiplying rows across event and monthly tables.
+    monthly = dict(db.execute(admin_select(MonthlyUsage.user_id, MonthlyUsage.requests).where(MonthlyUsage.month == month)).all())
+    token_rows = db.execute(admin_select(AIUsageEvent.user_id, admin_func.count(AIUsageEvent.id), admin_func.coalesce(admin_func.sum(AIUsageEvent.tokens), 0)).group_by(AIUsageEvent.user_id)).all()
+    totals = {uid: (count, tokens) for uid,count,tokens in token_rows}
+    users = db.scalars(admin_select(User).order_by(User.id).limit(500)).all()
+    return {"month": month, "limit": 500, "users": [{"id": u.id, "email": u.email, "plan": u.plan, "enabled": u.is_active, "registered_at": u.created_at.isoformat() if u.created_at else None, "requests_this_month": monthly.get(u.id, 0), "successful_ai_calls_all_time": totals.get(u.id, (0,0))[0], "tokens_all_time": totals.get(u.id, (0,0))[1]} for u in users]}
 
 # ==========================================
 # 5. AI PROVIDER CONFIGURATION
@@ -1203,13 +1285,13 @@ async def chat(
     )
     started = time.perf_counter()
 
-    category = classify(
-        req.message
-    )
+    # classify() may load/run an embedding model (USE_QWEN=true): keep it off the event loop.
+    category = await run_in_threadpool(classify, req.message)
 
     selected = select_provider(
         category,
-        req.provider
+        req.provider,
+        [p for p in KEYS if key_for(p)]
     )
 
     sequence = [selected] + [

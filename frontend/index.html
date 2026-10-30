@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AETHER AI Gateway — Next-Gen Model Router</title>
+  <title>AETHER AI Gateway â€” Next-Gen Model Router</title>
 
   <!-- Typography & Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1530,7 +1530,7 @@
       <div class="modal-body">
         <div class="config-field">
           <label class="config-label" for="cfgFastApiUrl">FastAPI Backend Endpoint</label>
-          <input type="text" id="cfgFastApiUrl" class="config-input" value="http://localhost:8000" placeholder="http://localhost:8000" />
+          <input type="text" id="cfgFastApiUrl" class="config-input" value="http://localhost:8001" placeholder="http://localhost:8001" />
           <span style="font-size:0.7rem; color:var(--text-muted)">Default endpoint for proxying through existing FastAPI backend router.</span>
         </div>
 
@@ -1589,7 +1589,7 @@
         isGenerating: false,
         abortController: null,
         config: {
-          fastApiUrl: 'http://localhost:8000'
+          fastApiUrl: 'http://localhost:8001'
 
         }
       };
@@ -1933,7 +1933,7 @@
         if (comp) {
           dom.liveComplexityBadge.style.display = 'inline-flex';
           dom.liveComplexityBadge.className = `live-complexity-indicator complexity-badge ${comp.colorClass}`;
-          dom.liveComplexityText.textContent = `${comp.level} · preview estimate`;
+          dom.liveComplexityText.textContent = `${comp.level} Â· preview estimate`;
         }
       }
 
@@ -2376,7 +2376,7 @@
           await streamTypewriterEffect(assistantMsg, responsePayload.content, state.abortController.signal);
 
           saveSessions();
-          dom.gatewayStatusText.textContent = `Gateway responded · ${latency}ms`;
+          dom.gatewayStatusText.textContent = `Gateway responded Â· ${latency}ms`;
 
         } catch (err) {
           const curTyping = document.getElementById(typingId);
@@ -2440,7 +2440,7 @@
           });
         } catch (error) {
           if (error.name === 'AbortError') throw error;
-          throw new Error('Cannot connect to FastAPI. Start the backend and check Settings → Backend URL.');
+          throw new Error('Cannot connect to FastAPI. Start the backend and check Settings â†’ Backend URL.');
         }
         if (!response.ok) {
           if (response.status === 401) {

@@ -80,7 +80,7 @@ def test_classification():
 
 
 def test_routing():
-    assert select_provider("coding") == "openai"
+    assert select_provider("coding", "auto", ["gemini", "openai"]) == "openai"
 
 
 def test_context():
