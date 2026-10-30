@@ -1,5 +1,34 @@
+# Environment variables and API keys
 .env
 **/.env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
+**/__pycache__/
+*.pyc
 .pytest_cache/
 .venv/
+**/.venv/
+venv/
+
+# Frontend
+node_modules/
+**/node_modules/
+dist/
+
+# Database and backups
+*.db
+*.sqlite3
+*.dump
+*.backup
+*.bak
+
+# IDE and system files
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
