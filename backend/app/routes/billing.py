@@ -44,3 +44,33 @@ async def razorpay_webhook(request: Request, db: Session = Depends(get_db)):
 
     # Always 200 for verified events (even duplicates/ignored) so Razorpay stops retrying.
     return {"status": outcome}
+
+
+# ===== Subscribe endpoint (added by setup_billing.ps1) =====
+from typing import Literal
+
+from fastapi import Depends, HTTPException
+from pydantic import BaseModel
+
+from app.services.razorpay_client import (
+    BillingConfigError,
+    RazorpayError,
+    create_subscription,
+)
+from app.routes.auth import get_current_user
+
+
+class SubscribeRequest(BaseModel):
+    plan: Literal["pro", "enterprise"]  # "free" or anything else gives 422
+
+
+@router.post("/subscribe")
+def subscribe(body: SubscribeRequest, current_user=Depends(get_current_user)):
+    if current_user.plan == body.plan:
+        raise HTTPException(status_code=409, detail="You are already on this plan")
+    try:
+        return create_subscription(user_id=current_user.id, plan=body.plan)
+    except BillingConfigError:
+        raise HTTPException(status_code=503, detail="Billing is not configured")
+    except RazorpayError:
+        raise HTTPException(status_code=502, detail="Payment provider error")
