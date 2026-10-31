@@ -560,15 +560,19 @@ def admin_overview(_admin: User = Depends(require_admin), db: Session = Depends(
     return {"registered_users": users, "enabled_accounts": active, "plans": {p: n for p,n in plans}, "month": month, "requests_this_month": requests_month, "successful_ai_events_all_time": successes, "tokens_all_time": tokens, "providers": [{"provider": p, "successful_calls": n, "tokens": t} for p,n,t in providers], "provider_metrics_current_process": metrics.snapshot()}
 
 
+from fastapi import Query as admin_Query  # noqa: E402
+
+
 @app.get("/admin/users", tags=["Admin"])
-def admin_users(_admin: User = Depends(require_admin), db: Session = Depends(get_db)):
+def admin_users(page: int = admin_Query(1, ge=1), page_size: int = admin_Query(500, ge=1, le=500), _admin: User = Depends(require_admin), db: Session = Depends(get_db)):
     month = datetime.now(timezone.utc).strftime("%Y-%m")
     # Aggregate separately to avoid multiplying rows across event and monthly tables.
     monthly = dict(db.execute(admin_select(MonthlyUsage.user_id, MonthlyUsage.requests).where(MonthlyUsage.month == month)).all())
     token_rows = db.execute(admin_select(AIUsageEvent.user_id, admin_func.count(AIUsageEvent.id), admin_func.coalesce(admin_func.sum(AIUsageEvent.tokens), 0)).group_by(AIUsageEvent.user_id)).all()
     totals = {uid: (count, tokens) for uid,count,tokens in token_rows}
-    users = db.scalars(admin_select(User).order_by(User.id).limit(500)).all()
-    return {"month": month, "limit": 500, "users": [{"id": u.id, "email": u.email, "plan": u.plan, "enabled": u.is_active, "registered_at": u.created_at.isoformat() if u.created_at else None, "requests_this_month": monthly.get(u.id, 0), "successful_ai_calls_all_time": totals.get(u.id, (0,0))[0], "tokens_all_time": totals.get(u.id, (0,0))[1]} for u in users]}
+    total = db.scalar(admin_select(admin_func.count(User.id))) or 0
+    users = db.scalars(admin_select(User).order_by(User.id).offset((page - 1) * page_size).limit(page_size)).all()
+    return {"month": month, "limit": page_size, "page": page, "page_size": page_size, "total": total, "pages": max(1, -(-total // page_size)), "users": [{"id": u.id, "email": u.email, "plan": u.plan, "enabled": u.is_active, "registered_at": u.created_at.isoformat() if u.created_at else None, "requests_this_month": monthly.get(u.id, 0), "successful_ai_calls_all_time": totals.get(u.id, (0,0))[0], "tokens_all_time": totals.get(u.id, (0,0))[1]} for u in users]}
 
 # ==========================================
 # 5. AI PROVIDER CONFIGURATION
