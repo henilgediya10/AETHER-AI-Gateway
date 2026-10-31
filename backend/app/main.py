@@ -1455,3 +1455,5 @@ async def chat(
             "failures": failures
         }
     )
+from .routes.account import router as account_router  # noqa: E402
+app.include_router(account_router)
