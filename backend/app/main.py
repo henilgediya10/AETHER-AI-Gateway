@@ -44,6 +44,7 @@ from .database import init_db, engine, get_db  # noqa: E402
 from .services.usage import reserve_request, record_success, current_usage  # noqa: E402
 from .routes.auth import router as auth_router, get_current_user  # noqa: E402
 from .models.user import User  # noqa: E402
+from .services.monitoring_alerts import evaluate_alerts  # noqa: E402
 
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
 IS_PROD = APP_ENV == "production"
@@ -213,8 +214,6 @@ log.propagate = False
 install_metrics(log)
 
 
-
-
 # ==========================================
 # 2. CONFIGURATION CHECKS (FAIL FAST)
 # ==========================================
@@ -312,7 +311,8 @@ def admin_metrics(request: Request):
     if not expected or not secrets.compare_digest(supplied, expected):
         raise HTTPException(status_code=403, detail="Metrics access denied")
 
-    return metrics.snapshot()
+    snapshot = metrics.snapshot()
+    return {**snapshot, "alerts": evaluate_alerts(snapshot)}
 
 
 @app.get("/health/live", tags=["Operations"])
@@ -396,45 +396,80 @@ async def security_and_request_id(request: Request, call_next):
 
 
 # ==========================================
-# PER-MINUTE RATE LIMITING
+# REDIS DISTRIBUTED RATE LIMITING
 # ==========================================
-# NOTE: state lives in this process. With N workers/instances the real limit is
-# N x the numbers below. Use Redis (or a gateway-level limiter) when you scale out.
+import uuid
+
+import redis
+
 RATE_LIMITS = {"free": 10, "pro": 60, "enterprise": 300}
 WINDOW_SECONDS = 60
-_request_history = defaultdict(deque)
-_rate_lock = Lock()
-_SWEEP_THRESHOLD = 5000
 
+redis_client = redis.Redis.from_url(
+    os.getenv("REDIS_URL", "redis://127.0.0.1:6379/0"),
+    socket_connect_timeout=2,
+    socket_timeout=2,
+    decode_responses=True,
+)
 
-def _sweep_idle_users(now: float) -> None:
-    """Drop users with no recent requests so the dict cannot grow forever."""
-    for user_id in list(_request_history):
-        timestamps = _request_history[user_id]
-        while timestamps and now - timestamps[0] >= WINDOW_SECONDS:
-            timestamps.popleft()
-        if not timestamps:
-            del _request_history[user_id]
+# Atomic rolling window on Redis server time (microseconds), so every
+# worker/instance shares one clock and one counter per user.
+RATE_LIMIT_SCRIPT = """
+local key = KEYS[1]
+local limit = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local member = ARGV[3]
+
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000000 + tonumber(t[2])
+local cutoff = now - window * 1000000
+
+redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+local count = redis.call('ZCARD', key)
+
+if count >= limit then
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    local retry = math.max(1, math.ceil(
+        (tonumber(oldest[2]) + window * 1000000 - now) / 1000000
+    ))
+    return {0, retry}
+end
+
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, window + 1)
+return {1, 0}
+"""
 
 
 def check_rate_limit(user_id: int, plan: str) -> None:
-    """Limit requests per user in a rolling 60-second window."""
+    """Limit requests per user in a rolling 60-second window (shared via Redis)."""
     limit = RATE_LIMITS.get(plan, RATE_LIMITS["free"])
-    now = time.monotonic()
-    with _rate_lock:
-        if len(_request_history) > _SWEEP_THRESHOLD:
-            _sweep_idle_users(now)
-        timestamps = _request_history[user_id]
-        while timestamps and now - timestamps[0] >= WINDOW_SECONDS:
-            timestamps.popleft()
-        if len(timestamps) >= limit:
-            retry_after = max(1, int(WINDOW_SECONDS - (now - timestamps[0])) + 1)
-            raise HTTPException(
-                status_code=429,
-                detail="Too many requests. Please try again shortly.",
-                headers={"Retry-After": str(retry_after)},
-            )
-        timestamps.append(now)
+    key = f"aether:rate:{user_id}"
+
+    try:
+        allowed, retry_after = redis_client.eval(
+            RATE_LIMIT_SCRIPT,
+            1,
+            key,
+            limit,
+            WINDOW_SECONDS,
+            uuid.uuid4().hex,
+        )
+    except redis.RedisError:
+        # Fail closed: never let a Redis outage disable rate limiting.
+        log.error("Rate limiter unavailable: Redis error", exc_info=True)
+        raise HTTPException(
+            status_code=503,
+            detail="Rate limiting service unavailable. Please try again shortly.",
+            headers={"Retry-After": "5"},
+        )
+
+    if not int(allowed):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many requests. Please try again shortly.",
+            headers={"Retry-After": str(int(retry_after))},
+        )
 
 
 # ==========================================
@@ -1276,7 +1311,10 @@ async def chat(
     db: Session = Depends(get_db),
 ):
 
-    check_rate_limit(current_user.id, current_user.plan)
+    # Redis call is blocking: keep it off the event loop.
+    await run_in_threadpool(
+        check_rate_limit, current_user.id, current_user.plan
+    )
 
     # reserve_request / record_success are blocking database calls. Run them in
     # the thread pool so one slow query cannot freeze every other request.
