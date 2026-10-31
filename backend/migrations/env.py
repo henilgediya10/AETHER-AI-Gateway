@@ -11,6 +11,7 @@ from app.database import Base, normalize_database_url
 from app.models.user import User  # noqa: F401
 from app.models.revoked_token import RevokedToken  # noqa: F401
 from app.models.usage import MonthlyUsage, AIUsageEvent  # noqa: F401
+from app.models.billing import PaymentEvent  # noqa: F401
 
 config = context.config
 if config.config_file_name:

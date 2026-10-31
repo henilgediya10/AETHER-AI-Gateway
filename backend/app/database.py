@@ -72,6 +72,7 @@ def init_db():
     from app.models.revoked_token import RevokedToken  # noqa: F401
 
     from app.models.usage import MonthlyUsage, AIUsageEvent  # noqa: F401
+    from app.models.billing import PaymentEvent  # noqa: F401
 
     # Create tables that do not already exist
     Base.metadata.create_all(bind=engine)

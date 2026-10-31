@@ -298,7 +298,9 @@ if not IS_PROD:
     init_db()
 
 # User registration / login API
+from .routes.billing import router as billing_router  # noqa: E402
 app.include_router(auth_router)
+app.include_router(billing_router)
 
 
 @app.get("/admin/metrics", tags=["Operations"])
